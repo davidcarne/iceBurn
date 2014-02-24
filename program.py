@@ -24,18 +24,116 @@ class SPIProtocolError(Exception):
         ProtocolError.__init__(self, "Command %s failed with error: %s" %( cmd,
                                err))
 
+class M25P10(object):
+    STAT_BUSY = 0x1
+    STAT_WEL = 0x2
+
+    CMD_GET_STATUS = 0x05
+    CMD_WRITE_ENABLE = 0x6
+    CMD_READ_ID = 0x9F
+    CMD_WAKEUP = 0xAB
+    CMD_CHIP_ERASE = 0xC7
+    CMD_PAGE_PROGRAM = 0x02
+    CMD_FAST_READ = 0xB
+
+    def __init__(self, iofn):
+        self.io = iofn
+
+    def wakeup(self):
+        self.io([self.CMD_WAKEUP])
+
+    def setWritable(self):
+        self.io([self.CMD_WRITE_ENABLE])
+
+    def chipErase(self):
+        self.setWritable()
+        self.io([self.CMD_CHIP_ERASE])
+        self.waitDone()
+
+    def read(self, addr, size):
+        return self.io([self.CMD_FAST_READ, (addr>>16) & 0xFF, (addr>>8)&0xFF, addr &
+                        0xFF, 0x00], size+5)[5:]
+    def pageProgram(self, addr, buf):
+        self.setWritable()
+        assert len(buf) <= 256
+        assert addr & 0xFF == 0
+
+        self.io([self.CMD_PAGE_PROGRAM, (addr>>16) & 0xFF, (addr>>8)&0xFF, addr &
+                 0xFF] + list(buf))
+        self.waitDone()
+
+    def waitDone(self):
+        while self.getStatus() & self.STAT_BUSY:
+            pass
+
+    def getStatus(self):
+        return self.io([self.CMD_GET_STATUS],2)[1]
+
+    def getID(self):
+        return self.io([self.CMD_READ_ID],4)[1:]
+
+
 class ICE40Board(object):
 
     CMD_GET_BOARD_TYPE = 0xE2
     CMD_GET_BOARD_SERIAL = 0xE4
 
+    class __ICE40GPIO(object):
+        def __init__(self, dev):
+            self.__is_open = False
+            self.dev = dev
+
+        def __enter__(self):
+            self.open()
+            return self
+
+        def __exit__(self, type, err, traceback):
+            self.__cleanup()
+
+        def __del__(self):
+            self.__cleanup()
+
+        def open(self):
+            assert not self.__is_open
+            # Some kind of open
+            self.dev.checked_cmd(0x03, 0x00, "gpioopen", [0x00], noret=True)
+            self.__is_open = True
+            
+        def close(self):
+            assert self.__is_open
+            self.dev.checked_cmd(0x03, 0x01, "gpioclose", 0x00)
+            self.__is_open = False
+
+        def __cleanup(self):
+            if self.__is_open:
+                self.close()
+
+        def __set_dir(self, direction):
+            self.dev.checked_cmd(0x03, 0x04, "0304", [0x00, direction, 0x00,
+                                                      0x00, 0x00])
+
+        def __set_value(self, value):
+            self.dev.checked_cmd(0x03, 0x06, "0306", [0x00, value, 0x00, 0x00,
+                                                  0x00],noret=True)
+
+        def ice40SetReset(self, assert_reset):
+            if assert_reset:
+                self.__set_dir(1)
+                self.__set_value(0)
+            else:
+                self.__set_dir(0)
+
+
     class __ICE40SPIPort(object):
         def __init__(self, dev, portno):
+            self.dev = dev
             self.__portno = portno
+            assert portno == 0x00
             self.__is_open = False
 
         def __enter__(self):
             self.open()
+            return self
 
         def __exit__(self, type, exc, traceback):
             self.__cleanup()
@@ -47,14 +145,89 @@ class ICE40Board(object):
             if self.__is_open:
                 self.close()
 
+        def io(self, write_bytes, read_byte_count=0):
+            assert self.__is_open
+            write_bytes = list(write_bytes)
+
+            # Pad write bytes to include 00's for readback
+            if len(write_bytes) < read_byte_count:
+                write_bytes.extend([0] * (read_byte_count - len(write_bytes)))
+
+            write_byte_count = len(write_bytes)
+            read_bytes = []
+
+            # probably assert nCS
+            self.dev.checked_cmd(0x06, 0x06, "SPIStart", [0x00, 0x00])
+
+
+            # Start IO txn
+            self.dev.checked_cmd(0x06, 0x07, "SPIIOStart", 
+
+                 # the meaning of the first 3 bytes is unknown
+                 struct.pack("<BBBBL", 0x00, 0x00, 0x00, 
+                             0x01 if read_byte_count else 0x00,
+                             write_byte_count),noret=True)
+
+            # Do the IO
+            while write_bytes or len(read_bytes) < read_byte_count:
+                if write_bytes:
+                    self.dev.ep_dataout.write(write_bytes[:64])
+                    write_bytes = write_bytes[64:]
+
+                if read_byte_count:
+                    to_read = min(64, read_byte_count) 
+                    read_bytes.extend(self.dev.ep_datain.read(to_read))
+
+
+
+            # End IO txn
+            status, resb =self.dev.cmd(0x06, 0x87,[0x00])
+           
+            # status & 0x80 indicates presence of write size
+            # status & 0x40 indicates presence of read size
+            # validate values
+            if status & 0x80:
+                wb = struct.unpack('<L', resb[:4])[0]
+                resb = resb[4:]
+                #print (wb, write_byte_count)
+                assert wb == write_byte_count
+                
+            if status & 0x40:
+                rb = struct.unpack('<L', resb[:4])[0]
+                resb = resb[4:]
+                assert rb == read_byte_count
+
+            # Clear CS
+            self.dev.checked_cmd(0x06, 0x06, "0606", [0x00, 0x01])
+
+            return bytes(read_bytes)
+
         def open(self):
-            pass
+            assert not self.__is_open
+            pl = self.dev.checked_cmd(0x06, 0x00, "SPIOpen", [self.__portno])
+            assert len(pl) == 0
+            self.__is_open = True
 
         def close(self):
-            pass
+            pl = self.dev.checked_cmd(0x06, 0x01, "SPIClose", [self.__portno])
+            assert len(pl) == 0
+            self.__is_open = False
 
-    def get_spi_port(self, pn):
-        return self.__ICE40SPIPort(self.dev, pn)
+        def setMode(self):
+            """May be mode-setting. [0,2] causes bits to be returned shifted right
+            one"""
+            assert self.__is_open
+            pl = self.dev.checked_cmd(0x06, 0x05, "SpiMode", [0,0])
+            assert len(pl) == 0
+
+        def setSpeed(self, speed):
+            """ sets the desired speed for the SPI interface. Returns actual speed
+            set"""
+            pl = self.dev.checked_cmd(0x06, 0x03, "SPISpeed", b'\x00' +
+                                  struct.pack("<L", speed))
+            assert self.__is_open
+            return (struct.unpack("<L",pl),)
+
 
     def __init__(self):
         # find our self.device
@@ -154,103 +327,12 @@ class ICE40Board(object):
                 self.checked_cmd(0x06, 0x06, "0606", [0x00, 0x01])
                 self.spi_close(0)
 
-    def spi_set_writable(self):
-        self.spi_io([0x06])
-        print("%02x" % self.spi_get_status())
 
-    def spi_chip_erase(self):
-        self.spi_set_writable()
-        self.spi_io([0xC7])
-        self.spi_wait_done()
+    def get_spi_port(self, pn):
+        return self.__ICE40SPIPort(self, pn)
 
-    def spi_wait_done(self):
-        while self.spi_get_status() & 0x1:
-            pass
-
-    def spi_get_status(self):
-        return self.spi_io([0x05],2)[1]
-
-    def spi_get_id(self):
-        return self.spi_io([0x9F],4)[1:]
-
-    def spi_io(self, write_bytes, read_byte_count=0):
-        write_bytes = list(write_bytes)
-
-        # Pad write count
-        if len(write_bytes) < read_byte_count:
-            write_bytes.extend([0] * (read_byte_count - len(write_bytes)))
-
-        write_byte_count = len(write_bytes)
-
-        read_bytes = []
-
-        # Set CS?
-        self.checked_cmd(0x06, 0x06, "0606", [0x00, 0x00])
-
-
-        # Start IO txn
-        self.checked_cmd(0x06, 0x07, "0607", 
-                         struct.pack("<BBBBL", 0x00, 0x00, 0x00, 
-                                     0x01 if read_byte_count else 0x00,
-                                     write_byte_count),noret=True)
-
-        # Do the IO
-        while write_bytes or len(read_bytes) < read_byte_count:
-            if write_bytes:
-                self.ep_dataout.write(write_bytes[:64])
-                write_bytes = write_bytes[256:]
-
-            if read_byte_count:
-                to_read = min(64, read_byte_count) 
-                read_bytes.extend(self.ep_datain.read(to_read))
-
-
-
-        # End IO txn
-        status, resb =self.cmd(0x06, 0x87,[0x00])
-       
-        # status & 0x80 indicates presence of write size
-        # status & 0x40 indicates presence of read size
-
-        if status & 0x80:
-            wb = struct.unpack('<L', resb[:4])[0]
-            resb = resb[4:]
-            assert wb == write_byte_count
-            
-        if status & 0x40:
-            rb = struct.unpack('<L', resb[:4])[0]
-            resb = resb[4:]
-            assert rb == read_byte_count
-
-        # Clear CS
-        self.checked_cmd(0x06, 0x06, "0606", [0x00, 0x01])
-
-        return bytes(read_bytes)
-
-    def spi_open(self, portno):
-        pl = self.checked_cmd(0x06, 0x00, "SPIOpen", [portno])
-        assert len(pl) == 0
-
-    def spi_close(self, portno):
-        pl = self.checked_cmd(0x06, 0x01, "SPIClose", [portno])
-        assert len(pl) == 0
-
-    def spi_unk(self):
-        """May be mode-setting. [0,2] causes bits to be returned shifted right
-        one"""
-        # 202011
-        # 901008
-        pl = self.checked_cmd(0x06, 0x05, "SpiMode", [0,0])
-        assert len(pl) == 0
-
-    def spi_speed(self, speed):
-        """ sets the desired speed for the SPI interface. Returns actual speed
-        set"""
-        pl = self.checked_cmd(0x06, 0x03, "SPISpeed", b'\x00' + struct.pack("<L",
-                                                                  speed),show=False)
-
-        return (struct.unpack("<L",pl),)
-
+    def get_gpio(self):
+        return self.__ICE40GPIO(self)
 
     def ctrl(self, selector, size_or_data, show=False):
         val = self.dev.ctrl_transfer(0xC0 if isinstance(size_or_data, int) else 0x04, 
@@ -296,22 +378,78 @@ class ICE40Board(object):
         btype = self.ctrl(0xE2, 16)
         return btype[:btype.index(b'\x00')].decode('ascii')
 
-    def get_board_serial(self):
+    def get_serial(self):
         return self.ctrl(0xE4, 16).decode('ascii')
 
 def main():
     import argparse
     ap = argparse.ArgumentParser()
     ap.add_argument("-e", "--erase", action="store_true")
+    ap.add_argument("-v", "--verbose", action="store_true")
+    ap.add_argument("-w", "--write", type=argparse.FileType("rb"))
     args = ap.parse_args()
 
     board = ICE40Board()
 
+    if args.verbose:
+        print("Found iCE40 board serial: %s" % board.get_serial())
+
 
     sp = board.get_spi_port(0)
 
-    with sp:
-        pass
+    with board.get_gpio() as gpio:
+        # Force the FPGA into reset so we may drive the IOs
+        gpio.ice40SetReset(True)
+
+        with board.get_spi_port(0) as sp:
+            sp.setSpeed(50000000)
+            sp.setMode()
+
+            flash = M25P10(sp.io)
+
+            flash.wakeup()
+            
+            # Verify that we're talking to the part we think we are
+            assert flash.getID() == b'\x20\x20\x11'
+
+            # Now, do the actions
+            if args.erase:
+                if args.verbose:
+                    print("Erasing flash...")
+                flash.chipErase()
+                if args.verbose:
+                    print("")
+
+            if args.write:
+                data = args.write.read()
+
+                if args.verbose:
+                    print("Writing image...")
+
+                for addr in range(0, len(data), 256):
+                    buf = data[addr:addr+256]
+                    flash.pageProgram(addr, buf)
+
+                if args.verbose:
+                    print("Verifying written image...")
+                # Now verify
+                buf = flash.read(0, len(data))
+                assert len(buf) == len(data)
+            
+                nvfailures = 0
+                for i,(a,b) in enumerate(zip(buf, data)):
+                    if a!=b:
+                        print ("verification failure at %06x: %02x != %02x" %
+                               (i,a,b))
+                        nvfailures += 1
+
+                    if nvfailures == 5:
+                        print("Too many verification failures, bailing")
+                        break
+
+        # Release the FPGA reset
+        gpio.ice40SetReset(False)
+
 
 if __name__ == "__main__":
     main()
