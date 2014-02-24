@@ -232,19 +232,16 @@ class ICE40Board(object):
     def __init__(self):
         # find our self.device
         self.dev = usb.core.find(idVendor=0x1443, idProduct=0x0007)
-
-        # was it found?
         if self.dev is None:
             raise ValueError('Device not found')
 
-        # set the active configuration. With no arguments, the first
-        # configuration will be the active one
         self.dev.set_configuration()
         
         # get an endpoint instance
         cfg = self.dev.get_active_configuration()
         intf = usb.util.find_descriptor(cfg)
 
+        # Allocate and verify all the endpoints used for comms
         self.ep_cmdout  = usb.util.find_descriptor(intf, bEndpointAddress = 1)
         self.ep_cmdin   = usb.util.find_descriptor(intf, bEndpointAddress = 0x82)
         self.ep_dataout = usb.util.find_descriptor(intf, bEndpointAddress = 3)
@@ -258,75 +255,6 @@ class ICE40Board(object):
         # Make sure we're talking to what we expect
         btype = self.get_board_type()
         assert btype == 'iCE40'
-
-        #print("ser:  %s" % self.get_board_serial())
-
-        # Unknown - returns 2E0140F0
-        #self.ctrl(0xE9, 0x04)
-
-        # Unknown - returns 16000000
-        #self.ctrl(0xE7, 8)
-
-        #self.ctrl(0xE9, 0x04)
-
-        # Handshake - 0xE8 sends a 2-byte value, 0xEC returns 'igiD' ^ value
-        #self.ctrl(0xE8, [0x9d, 0x01])
-        #buf = self.ctrl(0xEC, 0x04) 
-        #assert buf == b'igiD'
-        #self.ctrl(0xE8, [0x00,0x00])
-
-
-        # Seems to return 0x7A - value
-        #self.cmd(0x0, 0x03, [0x00, 0x01, 0x00, 0x00, 0x00], 16,
-        #                show=True)
-
-        return
-
-        spi_is_open = 0
-        gpio_is_open = 0
-        try:
-            self.spi_open(0)
-            spi_is_open = True
-            self.spi_unk()
-            self.spi_speed(50000000)
-
-
-            print (self.checked_cmd(0x03, 0x02, "0302", [0x00, 0x01]))
-            print (self.checked_cmd(0x03, 0x02, "0302", [0x00, 0x05]))
-
-            # Some kind of open
-            self.checked_cmd(0x03, 0x00, "gpioopen", [0x00], noret=True)
-            gpio_is_open=True
-            
-            ## Put FPGA to sleep 
-            # Dir?
-            self.checked_cmd(0x03, 0x04, "0304", [0x00, 0x01, 0x00, 0x00,
-                                                        0x00],show=True)
-            # Value?
-            self.checked_cmd(0x03, 0x06, "0306", [0x00, 0x00, 0x00, 0x00,
-                                                         0x00],
-                             noret=True)
-
-            # Wakeup the SPI part
-            self.spi_io([0xab, 0x00, 0x00, 0x00])
-
-            # Validate that the flash is the M25P10
-            assert self.spi_get_id() == b'\x20\x20\x11'
-
-            self.spi_chip_erase()
-
-            # Value?
-            self.checked_cmd(0x03, 0x06, "0306", [0x00, 0x01, 0x00, 0x00,
-                                                         0x00],
-                             noret=True)
-
-        finally:
-            if gpio_is_open:
-                self.checked_cmd(0x03, 0x01, "gpioclose", 0x00)
-            if spi_is_open:
-                self.checked_cmd(0x06, 0x06, "0606", [0x00, 0x01])
-                self.spi_close(0)
-
 
     def get_spi_port(self, pn):
         return self.__ICE40SPIPort(self, pn)
