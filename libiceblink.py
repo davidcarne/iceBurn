@@ -12,6 +12,7 @@ class SPIProtocolError(Exception):
     def __init__(self, cmd, rescode):
         lut = {
             3: "Resource in use",
+            4: "Resource not opened",
             12: "Invalid enum"
         }
         if rescode in lut:
@@ -75,6 +76,69 @@ class ICE40Board(object):
 
     CMD_GET_BOARD_TYPE = 0xE2
     CMD_GET_BOARD_SERIAL = 0xE4
+
+    class __ICE40BoardComm(object):
+        def __init__(self, dev):
+            self.__is_open = False
+            self.dev = dev
+
+        def __enter__(self):
+            self.open()
+            return self
+        
+        def __exit__(self, type, err, traceback):
+            self.__cleanup()
+
+        def __del__(self):
+            self.__cleanup()
+
+        def __cleanup(self):
+            if self.__is_open:
+                self.close()
+
+        def open(self):
+            assert not self.__is_open
+            self.dev.checked_cmd(0x04, 0x00, "bcommopen", [0x00], noret=True)
+            self.__is_open = True
+
+        def close(self):
+            assert self.__is_open
+            self.dev.checked_cmd(0x04, 0x01, "bcommclose", [0x00], noret=True,
+                                 )
+            self.__is_open = False
+
+        def __check_counts(self, status, resb, wr, rd):
+            if status & 0x80:
+                wb = struct.unpack('<L', resb[:4])[0]
+                resb = resb[4:]
+                #print (wb, write_byte_count)
+                assert wb == wr
+                
+            if status & 0x40:
+                rb = struct.unpack('<L', resb[:4])[0]
+                resb = resb[4:]
+                assert rb == rd
+
+        def readReg(self, regno):
+            self.dev.checked_cmd(0x04, 0x05, "bcommsetval", [0x00, regno, 
+                                                             0x01, 0x00, 0x00, 0x0])
+            res = self.dev.ep_datain.read(1)
+            status, pl = self.dev.cmd(0x04, 0x85, [0x00])
+            self.__check_counts(status, pl, 0, 1)
+            return res[0]
+
+        def writeReg(self, regno, value):
+            self.dev.checked_cmd(0x04, 0x04, "bcommsetval", [0x00, regno,
+                                                             0x01, 0x00, 0x00, 0x0])
+            self.dev.ep_dataout.write([value])
+            status, pl = self.dev.cmd(0x04, 0x85, [0x00])
+            self.__check_counts(status, pl, 1, 0)
+
+        def readMulti(self, addrs):
+            pass
+
+        def writeMulti(self, addrvals):
+            pass
 
     class __ICE40GPIO(object):
         def __init__(self, dev):
@@ -259,6 +323,9 @@ class ICE40Board(object):
 
     def get_gpio(self):
         return self.__ICE40GPIO(self)
+
+    def get_board_comm(self):
+        return self.__ICE40BoardComm(self)
 
     def ctrl(self, selector, size_or_data, show=False):
         val = self.dev.ctrl_transfer(0xC0 if isinstance(size_or_data, int) else 0x04, 

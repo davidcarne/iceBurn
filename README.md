@@ -11,9 +11,28 @@ This tool was created from black-box inspection of the USB datastream between a 
 - python 3 or newer
 - pyusb 1.0 or newer
 
-# Usage
+# Usage - iCEburn.py
 
 ./iCEburn.py -v -e -w path\_to\_build.bin
+
+# regtool
+
+Regtool is an example test script to poke at registers via the FPGA data link. The argument
+
+    -r 0xAB
+
+will do a read of register 0xAB and print the result to the console. The argument
+
+    -w 0xAB:0xCD
+ 
+will write register 0xAB with value and print the result to the console. With the stock FPGA firmware
+ 
+    ./regtool.py -w 5:0x48
+
+will stop the scrolling pattern and fix LED3 on.
+
+Regtool is primarily intended as an example of API usage, and not as a production grade tool.
+
 
 # Bugs
 
@@ -25,8 +44,6 @@ This is a bug in pyusb.
 
 
 # TODO
-
-- The microcontroller on the PCB seems to support FPGA<->host communications passthrough. This functionality should be implemented.
 
 - Verify on HX1K board
 
