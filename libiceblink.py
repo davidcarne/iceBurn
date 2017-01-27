@@ -297,6 +297,7 @@ class ICE40Board(object):
         if self.dev is None:
             raise ValueError('Device not found')
 
+        self.dev.reset()
         self.dev.set_configuration()
         
         # get an endpoint instance
