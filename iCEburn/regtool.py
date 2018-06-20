@@ -1,7 +1,7 @@
 #!/usr/bin/python3
 
 import argparse
-from libiceblink import ICE40Board
+from iCEburn.libiceblink import ICE40Board
 
 def rtype(x):
     return ('R', int(x, 16))

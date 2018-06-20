@@ -1,6 +1,6 @@
-#!/usr/bin/python3.3
+#!/usr/bin/python3
 import argparse
-from libiceblink import ICE40Board, M25P10
+from iCEburn.libiceblink import ICE40Board, M25P10
 
 def main():
     ap = argparse.ArgumentParser()
